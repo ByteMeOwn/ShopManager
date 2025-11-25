@@ -3,7 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 import re
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Callable, Dict
 from PIL import Image, ImageTk
 import psycopg2
 from psycopg2 import Error as PgError
@@ -665,77 +665,65 @@ class ItemMallEditor:
                 continue
         return "utf-8"
 
+    def _process_ini_file(self, file_path: str, parse_line_func: Callable[[str], Optional[tuple]], target_dict: Dict):
+        if not os.path.exists(file_path):
+            return
+
+        try:
+            encoding = self.detect_encoding(file_path)
+            with open(file_path, "r", encoding=encoding, errors="replace") as f:
+                lines = f.readlines()
+
+            for line in lines[1:]:
+                line = line.strip()
+                if not line or line.startswith(";"):
+                    continue
+
+                result = parse_line_func(line)
+                if result:
+                    key, value = result
+                    target_dict[key] = value
+        except Exception as e:
+            self.log_message(
+                f"Erro ao ler arquivo INI {os.path.basename(file_path)}: {e}",
+                level="ERROR",
+                source="DB",
+            )
+
     def load_item_mappings(self):
         start_time = time.time()
         data_db_dir = os.path.join(self.game_directory, "data", "db")
         Translate_dir = os.path.join(self.game_directory, "data", "Translate")
 
-        def process_icon_ini(base_dir, filename):
-            path = os.path.join(base_dir, filename)
-            if not os.path.exists(path):
-                return
+        def parse_icon_line(line: str) -> Optional[tuple]:
+            parts = line.split("|")
+            if len(parts) > 1:
+                try:
+                    item_id = int(parts[0])
+                    icon_name = parts[1].strip()
+                    if icon_name:
+                        return item_id, icon_name
+                except ValueError:
+                    pass
+            return None
 
-            try:
-                encoding = self.detect_encoding(path)
-                with open(path, "r", encoding=encoding, errors="replace") as f:
-                    lines = f.readlines()
+        def parse_name_line(line: str) -> Optional[tuple]:
+            parts = line.split("|")
+            if len(parts) > 2:
+                try:
+                    item_id = int(parts[0])
+                    display_name = parts[1].strip()
+                    if display_name:
+                        return item_id, display_name
+                except ValueError:
+                    pass
+            return None
 
-                for line in lines[1:]:
-                    line = line.strip()
-                    if not line or line.startswith(";"):
-                        continue
+        self._process_ini_file(os.path.join(data_db_dir, "C_Item.ini"), parse_icon_line, self.item_icon_names)
+        self._process_ini_file(os.path.join(data_db_dir, "C_ItemMall.ini"), parse_icon_line, self.item_icon_names)
+        self._process_ini_file(os.path.join(Translate_dir, "T_Item.ini"), parse_name_line, self.item_display_names)
+        self._process_ini_file(os.path.join(Translate_dir, "T_ItemMall.ini"), parse_name_line, self.item_display_names)
 
-                    parts = line.split("|")
-                    if len(parts) > 1:
-                        try:
-                            item_id = int(parts[0])
-                            icon_name = parts[1].strip()
-                            if icon_name:
-                                self.item_icon_names[item_id] = icon_name
-                        except ValueError:
-                            continue
-            except Exception as e:
-                self.log_message(
-                    f"Erro ao ler arquivo de ícones {filename}: {e}",
-                    level="ERROR",
-                    source="DB",
-                )
-
-        def process_name_ini(base_dir, filename):
-            path = os.path.join(base_dir, filename)
-            if not os.path.exists(path):
-                return
-
-            try:
-                encoding = self.detect_encoding(path)
-                with open(path, "r", encoding=encoding, errors="replace") as f:
-                    lines = f.readlines()
-
-                for line in lines[1:]:
-                    line = line.strip()
-                    if not line or line.startswith(";"):
-                        continue
-
-                    parts = line.split("|")
-                    if len(parts) > 2:
-                        try:
-                            item_id = int(parts[0])
-                            display_name = parts[1].strip()
-                            if display_name:
-                                self.item_display_names[item_id] = display_name
-                        except ValueError:
-                            continue
-            except Exception as e:
-                self.log_message(
-                    f"Erro ao ler arquivo de nomes {filename}: {e}",
-                    level="ERROR",
-                    source="DB",
-                )
-
-        process_icon_ini(data_db_dir, "C_Item.ini")
-        process_icon_ini(data_db_dir, "C_ItemMall.ini")
-        process_name_ini(Translate_dir, "T_Item.ini")
-        process_name_ini(Translate_dir, "T_ItemMall.ini")
         end_time = time.time()
         self.log_message(
             f"Tempo de leitura dos scripts INI: {end_time - start_time:.4f} segundos",
@@ -778,192 +766,143 @@ class ItemMallEditor:
             )
             return None
 
+    def _generate_itemmall_sql_content(self, items_list: List[ItemMall]) -> str:
+        sql_content = 'DROP TABLE IF EXISTS "public"."itemmall";\n\n'
+        sql_content += 'CREATE TABLE "public"."itemmall" (\n'
+        sql_content += '  "item_id" int4 NOT NULL,\n'
+        sql_content += '  "item_group" int4 NOT NULL,\n'
+        sql_content += '  "item_index" int4 NOT NULL,\n'
+        sql_content += '  "item_num" int4 NOT NULL,\n'
+        sql_content += '  "money_unit" int4 NOT NULL,\n'
+        sql_content += '  "point" int4 NOT NULL,\n'
+        sql_content += '  "special_price" int4 NOT NULL,\n'
+        sql_content += '  "sell" int4 NOT NULL,\n'
+        sql_content += '  "on_sell_date" int4 NOT NULL,\n'
+        sql_content += '  "not_sell_date" int4 NOT NULL,\n'
+        sql_content += '  "account_num_limit" int4 DEFAULT 0,\n'
+        sql_content += '  "recognized_percentage" float8 NOT NULL,\n'
+        sql_content += ' "fortune_bag" text COLLATE "pg_catalog"."default" DEFAULT \'\'::text,\n'
+        sql_content += '  "allow_buy_level" int4 NOT NULL,\n'
+        sql_content += '  "new_account_day_limit" int4 DEFAULT 0,\n'
+        sql_content += (
+            ' "note" text COLLATE "pg_catalog"."default" DEFAULT \'\'::text\n'
+        )
+        sql_content += ");\n\n"
+
+        for item in items_list:
+            escaped_note = item.note.replace("'", "''")
+            sql_content += f'INSERT INTO "public"."itemmall" VALUES '
+            sql_content += (
+                f"({item.item_id}, {item.item_group}, {item.item_index}, "
+            )
+            sql_content += f"{item.item_num}, {item.money_unit}, {item.point}, "
+            sql_content += (
+                f"{item.special_price}, {item.sell}, {item.on_sell_date}, "
+            )
+            sql_content += f"{item.not_sell_date}, {item.account_num_limit}, "
+            sql_content += f'{item.recognized_percentage}, \'{item.fortune_bag.replace("'", "''")}\''
+            sql_content += (
+                f", {item.allow_buy_level}, {item.new_account_day_limit}, "
+            )
+            sql_content += f"'{escaped_note}');\n"
+        return sql_content
+
+    def _handle_sql_export_action(self, action: str, sql_content: str):
+        if action == "copy_db":
+            self.root.clipboard_clear()
+            self.root.clipboard_append(sql_content)
+            self.root.update()
+            self.log_message(
+                "Script SQL copiado para a área de transferência.",
+                level="INFO",
+                source="UI",
+            )
+        elif action == "save":
+            file_path = filedialog.asksaveasfilename(
+                title="Salvar arquivo SQL",
+                defaultextension=".sql",
+                filetypes=[("Arquivos SQL", "*.sql"), ("Todos os arquivos", "*.*")],
+                initialfile="itemmall.sql",
+            )
+            if not file_path:
+                self.log_message(
+                    "Salvamento de arquivo SQL cancelado.",
+                    level="WARNING",
+                    source="DB",
+                )
+                return
+            with open(file_path, "w", encoding="utf-8", errors="replace") as f:
+                f.write(sql_content)
+            self.log_message(
+                f"Arquivo SQL salvo em: {file_path}", level="INFO", source="DB"
+            )
+        elif action == "execute_db":
+            if not self.db_conn:
+                self.log_message(
+                    "Não está conectado ao banco de dados para executar o script.",
+                    level="ERROR",
+                    source="DB",
+                )
+                return
+
+            self.log_message(
+                "AVISO: Esta operação irá APAGAR e REINSERIR todos os itens da tabela itemmall no banco de dados.",
+                level="WARNING",
+                source="DB",
+            )
+            try:
+                cursor = self.db_conn.cursor()
+                self.log_message(
+                    "Iniciando execução do script SQL no banco de dados...",
+                    level="INFO",
+                    source="DB",
+                )
+                
+                
+                commands = [cmd.strip() for cmd in sql_content.split(';') if cmd.strip()]
+
+                for cmd in commands:
+                    if cmd:
+                        cursor.execute(cmd)
+                        self.db_conn.commit()
+                
+                self.log_message(
+                    "Script SQL executado no banco de dados com sucesso.",
+                    level="INFO",
+                    source="DB",
+                )
+                cursor.close()
+                self.load_items_from_db()
+            except PgError as e:
+                self.db_conn.rollback()
+                self.log_message(
+                    f"Erro ao executar script no DB: {e}",
+                    level="ERROR",
+                    source="DB",
+                )
+            except Exception as e:
+                self.db_conn.rollback()
+                self.log_message(
+                    f"Erro inesperado ao executar script no DB: {str(e)}",
+                    level="ERROR",
+                    source="DB",
+                )
+        else:
+            self.log_message(
+                "Ação desconhecida para exportação de SQL.",
+                level="ERROR",
+                source="UI",
+            )
+
     def export_sql(self, action: str):
         start_time = time.time()
         try:
             self.log_message("Gerando script SQL...", level="INFO", source="DB")
-
             sorted_items = sorted(
                 self.items, key=lambda x: (x.item_group, x.item_index, x.money_unit)
             )
-
-            sql_content = 'DROP TABLE IF EXISTS "public"."itemmall";\n\n'
-            sql_content += 'CREATE TABLE "public"."itemmall" (\n'
-            sql_content += '  "item_id" int4 NOT NULL,\n'
-            sql_content += '  "item_group" int4 NOT NULL,\n'
-            sql_content += '  "item_index" int4 NOT NULL,\n'
-            sql_content += '  "item_num" int4 NOT NULL,\n'
-            sql_content += '  "money_unit" int4 NOT NULL,\n'
-            sql_content += '  "point" int4 NOT NULL,\n'
-            sql_content += '  "special_price" int4 NOT NULL,\n'
-            sql_content += '  "sell" int4 NOT NULL,\n'
-            sql_content += '  "on_sell_date" int4 NOT NULL,\n'
-            sql_content += '  "not_sell_date" int4 NOT NULL,\n'
-            sql_content += '  "account_num_limit" int4 DEFAULT 0,\n'
-            sql_content += '  "recognized_percentage" float8 NOT NULL,\n'
-            sql_content += ' "fortune_bag" text COLLATE "pg_catalog"."default" DEFAULT \'\'::text,\n'
-            sql_content += '  "allow_buy_level" int4 NOT NULL,\n'
-            sql_content += '  "new_account_day_limit" int4 DEFAULT 0,\n'
-            sql_content += (
-                ' "note" text COLLATE "pg_catalog"."default" DEFAULT \'\'::text\n'
-            )
-            sql_content += ");\n\n"
-
-            for item in sorted_items:
-                escaped_note = item.note.replace("'", "''")
-                sql_content += f'INSERT INTO "public"."itemmall" VALUES '
-                sql_content += (
-                    f"({item.item_id}, {item.item_group}, {item.item_index}, "
-                )
-                sql_content += f"{item.item_num}, {item.money_unit}, {item.point}, "
-                sql_content += (
-                    f"{item.special_price}, {item.sell}, {item.on_sell_date}, "
-                )
-                sql_content += f"{item.not_sell_date}, {item.account_num_limit}, "
-                sql_content += f'{item.recognized_percentage}, \'{item.fortune_bag.replace("'", "''")}\''
-                sql_content += (
-                    f", {item.allow_buy_level}, {item.new_account_day_limit}, "
-                )
-                sql_content += f"'{escaped_note}');\n"
-
-            if action == "copy_db":
-                self.root.clipboard_clear()
-                self.root.clipboard_append(sql_content)
-                self.root.update()
-                self.log_message(
-                    "Script SQL copiado para a área de transferência.",
-                    level="INFO",
-                    source="UI",
-                )
-            elif action == "save":
-                file_path = filedialog.asksaveasfilename(
-                    title="Salvar arquivo SQL",
-                    defaultextension=".sql",
-                    filetypes=[("Arquivos SQL", "*.sql"), ("Todos os arquivos", "*.*")],
-                    initialfile="itemmall.sql",
-                )
-                if not file_path:
-                    self.log_message(
-                        "Salvamento de arquivo SQL cancelado.",
-                        level="WARNING",
-                        source="DB",
-                    )
-                    return
-                with open(file_path, "w", encoding="utf-8", errors="replace") as f:
-                    f.write(sql_content)
-                self.log_message(
-                    f"Arquivo SQL salvo em: {file_path}", level="INFO", source="DB"
-                )
-            elif action == "execute_db":
-                if not self.db_conn:
-                    self.log_message(
-                        "Não está conectado ao banco de dados para executar o script.",
-                        level="ERROR",
-                        source="DB",
-                    )
-                    return
-
-                self.log_message(
-                    "AVISO: Esta operação irá APAGAR e REINSERIR todos os itens da tabela itemmall no banco de dados.",
-                    level="WARNING",
-                    source="DB",
-                )
-
-                try:
-                    cursor = self.db_conn.cursor()
-
-                    self.log_message(
-                        "Iniciando execução do script SQL no banco de dados...",
-                        level="INFO",
-                        source="DB",
-                    )
-
-                    self.log_message(
-                        'Executando DROP TABLE IF EXISTS "public"."itemmall";',
-                        level="INFO",
-                        source="DB",
-                    )
-                    cursor.execute('DROP TABLE IF EXISTS "public"."itemmall";')
-                    self.db_conn.commit()
-                    self.log_message(
-                        "Tabela 'itemmall' removida (se existia).",
-                        level="INFO",
-                        source="DB",
-                    )
-
-                    self.log_message(
-                        'Executando CREATE TABLE "public"."itemmall" ...',
-                        level="INFO",
-                        source="DB",
-                    )
-                    create_table_sql = """
-                    CREATE TABLE "public"."itemmall" (
-                      "item_id" int4 NOT NULL,
-                      "item_group" int4 NOT NULL,
-                      "item_index" int4 NOT NULL,
-                      "item_num" int4 NOT NULL,
-                      "money_unit" int4 NOT NULL,
-                      "point" int4 NOT NULL,
-                      "special_price" int4 NOT NULL,
-                      "sell" int4 NOT NULL,
-                      "on_sell_date" int4 NOT NULL,
-                      "not_sell_date" int4 NOT NULL,
-                      "account_num_limit" int4 DEFAULT 0,
-                      "recognized_percentage" float8 NOT NULL,
-                      "fortune_bag" text COLLATE "pg_catalog"."default" DEFAULT ''::text,
-                      "allow_buy_level" int4 NOT NULL,
-                      "new_account_day_limit" int4 DEFAULT 0,
-                      "note" text COLLATE "pg_catalog"."default" DEFAULT ''::text
-                    );
-                    """
-                    cursor.execute(create_table_sql)
-                    self.db_conn.commit()
-                    self.log_message(
-                        "Tabela 'itemmall' criada.", level="INFO", source="DB"
-                    )
-
-                    for item in sorted_items:
-                        insert_sql = (
-                            f'INSERT INTO "public"."itemmall" VALUES '
-                            f"({item.item_id}, {item.item_group}, {item.item_index}, "
-                            f"{item.item_num}, {item.money_unit}, {item.point}, "
-                            f"{item.special_price}, {item.sell}, {item.on_sell_date}, "
-                            f"{item.not_sell_date}, {item.account_num_limit}, "
-                            f'{item.recognized_percentage}, \'{item.fortune_bag.replace("'", "''")}\''
-                            f", {item.allow_buy_level}, {item.new_account_day_limit}, "
-                            f'\'{item.note.replace("'", "''")}\');'
-                        )
-
-                        cursor.execute(insert_sql)
-
-                    self.db_conn.commit()
-                    self.log_message(
-                        "Script SQL executado no banco de dados com sucesso.",
-                        level="INFO",
-                        source="DB",
-                    )
-                    cursor.close()
-                    self.load_items_from_db()
-                except PgError as e:
-                    self.db_conn.rollback()
-                    self.log_message(
-                        f"Erro ao executar script no DB: {e}",
-                        level="ERROR",
-                        source="DB",
-                    )
-                except Exception as e:
-                    self.db_conn.rollback()
-                    self.log_message(
-                        f"Erro inesperado ao executar script no DB: {str(e)}",
-                        level="ERROR",
-                        source="DB",
-                    )
-            else:
-                self.log_message(
-                    "Ação desconhecida para exportação de SQL.",
-                    level="ERROR",
-                    source="UI",
-                )
+            sql_content = self._generate_itemmall_sql_content(sorted_items)
+            self._handle_sql_export_action(action, sql_content)
         except Exception as e:
             self.log_message(
                 f"Erro ao exportar SQL: {str(e)}", level="ERROR", source="UI"
@@ -1017,23 +956,21 @@ class ItemMallEditor:
                 source="DB",
             )
 
-            commands = re.split(r";\s*$", sql_content, flags=re.MULTILINE)
+            commands = [cmd.strip() for cmd in re.split(r";\s*$", sql_content, flags=re.MULTILINE) if cmd.strip()]
 
             for cmd in commands:
-                cmd = cmd.strip()
-                if cmd:
-                    try:
-                        cursor.execute(cmd)
-                        self.db_conn.commit()
-                    except PgError as statement_error:
-                        self.db_conn.rollback()
-                        self.log_message(
-                            f"Erro ao executar comando do arquivo SQL: {statement_error}\nComando: {cmd[:200]}...",
-                            level="ERROR",
-                            source="DB",
-                        )
-                        cursor.close()
-                        return
+                try:
+                    cursor.execute(cmd)
+                    self.db_conn.commit()
+                except PgError as statement_error:
+                    self.db_conn.rollback()
+                    self.log_message(
+                        f"Erro ao executar comando do arquivo SQL: {statement_error}\nComando: {cmd[:200]}...",
+                        level="ERROR",
+                        source="DB",
+                    )
+                    cursor.close()
+                    return
 
             cursor.close()
             self.log_message(
@@ -1225,8 +1162,7 @@ class ItemMallEditor:
             self.filtered_items = self.filtered_items[:8]
 
         if preserve_page:
-            total_items = len(self.filtered_items)
-            total_pages = max(1, (total_items - 1) // self.items_per_page + 1)
+            total_pages = self._get_total_pages()
             if self.current_page >= total_pages:
                 self.current_page = max(0, total_pages - 1)
         self.refresh_cards()
@@ -1353,18 +1289,26 @@ class ItemMallEditor:
         bind_click(price_row)
         return card
 
+    def _get_total_pages(self):
+        total_items = len(self.filtered_items)
+        total_pages = max(
+            1, (total_items + self.items_per_page - 1) // self.items_per_page
+        )
+        if (
+            total_items > 0
+            and total_items % self.items_per_page == 0
+            and (self.current_category != 50 or len(self.filtered_items) < 8)
+        ):
+            total_pages += 1
+        return total_pages
+
+
     def refresh_cards(self):
         for widget in self.cards_frame.winfo_children():
             widget.destroy()
 
         total_items = len(self.filtered_items)
-
-        total_pages = max(
-            1, (total_items + self.items_per_page - 1) // self.items_per_page
-        )
-
-        if total_items > 0 and total_items % self.items_per_page == 0:
-            total_pages += 1
+        total_pages = self._get_total_pages()
 
         if self.current_page >= total_pages:
             self.current_page = max(0, total_pages - 1)
@@ -1443,17 +1387,7 @@ class ItemMallEditor:
         self.btn_next.config(state="normal")
 
     def prev_page(self):
-        total_items = len(self.filtered_items)
-        total_pages = max(
-            1, (total_items + self.items_per_page - 1) // self.items_per_page
-        )
-
-        if (
-            total_items > 0
-            and total_items % self.items_per_page == 0
-            and (self.current_category != 50 or len(self.filtered_items) < 8)
-        ):
-            total_pages += 1
+        total_pages = self._get_total_pages()
 
         if self.current_page > 0:
             self.current_page -= 1
@@ -1467,17 +1401,7 @@ class ItemMallEditor:
         )
 
     def next_page(self):
-        total_items = len(self.filtered_items)
-        total_pages = max(
-            1, (total_items + self.items_per_page - 1) // self.items_per_page
-        )
-
-        if (
-            total_items > 0
-            and total_items % self.items_per_page == 0
-            and (self.current_category != 50 or len(self.filtered_items) < 8)
-        ):
-            total_pages += 1
+        total_pages = self._get_total_pages()
 
         if self.current_page < total_pages - 1:
             self.current_page += 1
@@ -1524,15 +1448,15 @@ class ItemMallEditor:
             return
 
         self.items = []
-        try:
-            cursor = self.db_conn.cursor()
-
-            cursor.execute(
-                "SELECT item_id, item_group, item_index, item_num, money_unit, point, special_price, sell, on_sell_date, not_sell_date, account_num_limit, recognized_percentage, fortune_bag, allow_buy_level, new_account_day_limit, note FROM public.itemmall ORDER BY item_group, item_index, money_unit;"
-            )
-            rows = cursor.fetchall()
-
-            for row in rows:
+        query = """
+            SELECT item_id, item_group, item_index, item_num, money_unit, point, special_price, sell, on_sell_date,
+                   not_sell_date, account_num_limit, recognized_percentage, fortune_bag, allow_buy_level,
+                   new_account_day_limit, note
+            FROM public.itemmall
+            ORDER BY item_group, item_index, money_unit;
+        """
+        def process_rows(cursor):
+            for row in cursor.fetchall():
                 item_id = row[0]
                 item = ItemMall(
                     item_id=item_id,
@@ -1557,31 +1481,20 @@ class ItemMallEditor:
                     ),
                 )
                 self.items.append(item)
-            cursor.close()
             self.filter_by_category(self.current_category, preserve_page=True)
             self.log_message(
                 f"Carregados {len(self.items)} itens do banco de dados.",
                 level="INFO",
                 source="DB",
             )
-
-        except PgError as e:
-            self.log_message(
-                f"Erro ao carregar itens do DB: {e}", level="ERROR", source="DB"
-            )
-        except Exception as e:
-            self.log_message(
-                f"Erro inesperado ao carregar itens do DB: {str(e)}",
-                level="ERROR",
-                source="DB",
-            )
-        finally:
-            end_time = time.time()
-            self.log_message(
-                f"Tempo de carregamento de itens do DB: {end_time - start_time:.4f} segundos",
-                level="INFO",
-                source="DB",
-            )
+        
+        self._execute_db_operation(query, msg_success="Itens carregados do DB.", msg_fail="Erro ao carregar itens do DB.", callback=process_rows)
+        end_time = time.time()
+        self.log_message(
+            f"Tempo de carregamento de itens do DB: {end_time - start_time:.4f} segundos",
+            level="INFO",
+            source="DB",
+        )
 
     def add_item(self):
         start_time = time.time()
@@ -1662,7 +1575,7 @@ class ItemMallEditor:
                     and item.money_unit == self.current_money_unit
                 ]
             )
-            if count_popular >= 8:
+            if count_popular >= 8 and new_item not in self.items:
                 self.log_message(
                     "Só é permitido até 8 itens na aba POPULAR.",
                     level="WARNING",
@@ -1684,24 +1597,44 @@ class ItemMallEditor:
             source="UI",
         )
 
-    def insert_item_into_db(self, item: ItemMall):
-        start_time = time.time()
+    def _execute_db_operation(self, query: str, params=None, msg_success: str = "", msg_fail: str = "", callback: Optional[Callable] = None):
         if not self.db_conn:
-            self.log_message(
-                "Não está em modo de banco de dados para inserir itens.",
-                level="ERROR",
-                source="DB",
-            )
-            return
-
+            self.log_message(msg_fail or "Não conectado ao banco de dados.", level="ERROR", source="DB")
+            return False
+        
         try:
             cursor = self.db_conn.cursor()
+            cursor.execute(query, params)
+            self.db_conn.commit()
+            if callback:
+                callback(cursor)
+            cursor.close()
+            self.log_message(msg_success, level="INFO", source="DB")
+            return True
+        except PgError as e:
+            self.db_conn.rollback()
+            self.log_message(f"{msg_fail}: {e}", level="ERROR", source="DB")
+            return False
+        except Exception as e:
+            self.db_conn.rollback()
+            self.log_message(f"Erro inesperado durante a operação no DB: {str(e)}", level="ERROR", source="DB")
+            return False
 
-            cursor.execute(
-                """SELECT COUNT(*) FROM public.itemmall WHERE item_group = %s AND item_index = %s AND money_unit = %s;""",
-                (item.item_group, item.item_index, item.money_unit),
-            )
+    def insert_item_into_db(self, item: ItemMall):
+        start_time = time.time()
+        insert_query = """
+            INSERT INTO public.itemmall (item_id, item_group, item_index, item_num, money_unit, point,
+            special_price, sell, on_sell_date, not_sell_date, account_num_limit,
+            recognized_percentage, fortune_bag, allow_buy_level, new_account_day_limit, note)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+        """
+        
+        check_query = """SELECT COUNT(*) FROM public.itemmall WHERE item_group = %s AND item_index = %s AND money_unit = %s;"""
+        try:
+            cursor = self.db_conn.cursor()
+            cursor.execute(check_query, (item.item_group, item.item_index, item.money_unit))
             count = cursor.fetchone()[0]
+            cursor.close()
 
             if count > 0:
                 original_index = item.item_index
@@ -1713,74 +1646,29 @@ class ItemMallEditor:
                     level="WARNING",
                     source="DB",
                 )
-
-            insert_query = """
-            INSERT INTO public.itemmall (item_id, item_group, item_index, item_num, money_unit, point,
-            special_price, sell, on_sell_date, not_sell_date, account_num_limit,
-            recognized_percentage, fortune_bag, allow_buy_level, new_account_day_limit, note)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-            """
-            cursor.execute(
-                insert_query,
-                (
-                    item.item_id,
-                    item.item_group,
-                    item.item_index,
-                    item.item_num,
-                    item.money_unit,
-                    item.point,
-                    item.special_price,
-                    item.sell,
-                    item.on_sell_date,
-                    item.not_sell_date,
-                    item.account_num_limit,
-                    item.recognized_percentage,
-                    item.fortune_bag,
-                    item.allow_buy_level,
-                    item.new_account_day_limit,
-                    item.note,
-                ),
-            )
-            self.db_conn.commit()
-            self.log_message(
-                f"Item {item.item_id} (Index: {item.item_index}) inserido no banco de dados.",
-                level="INFO",
-                source="DB",
-            )
-
-        except PgError as e:
-            self.db_conn.rollback()
-            self.log_message(
-                f"Erro ao inserir item no DB: {e}", level="ERROR", source="DB"
-            )
         except Exception as e:
-            self.db_conn.rollback()
-            self.log_message(
-                f"Erro inesperado ao inserir item no DB: {str(e)}",
-                level="ERROR",
-                source="DB",
-            )
-        finally:
-            end_time = time.time()
-            self.log_message(
-                f"Tempo de inserção de item no DB: {end_time - start_time:.4f} segundos",
-                level="INFO",
-                source="DB",
-            )
+            self.log_message(f"Erro ao verificar índice do item: {e}", level="ERROR", source="DB")
+            
+        params = (
+            item.item_id, item.item_group, item.item_index, item.item_num, item.money_unit, item.point,
+            item.special_price, item.sell, item.on_sell_date, item.not_sell_date, item.account_num_limit,
+            item.recognized_percentage, item.fortune_bag, item.allow_buy_level, item.new_account_day_limit, item.note,
+        )
+        self._execute_db_operation(
+            insert_query, params,
+            msg_success=f"Item {item.item_id} (Index: {item.item_index}) inserido no banco de dados.",
+            msg_fail="Erro ao inserir item no DB."
+        )
+        end_time = time.time()
+        self.log_message(
+            f"Tempo de inserção de item no DB: {end_time - start_time:.4f} segundos",
+            level="INFO",
+            source="DB",
+        )
 
     def update_item_in_db(self, item: ItemMall):
         start_time = time.time()
-        if not self.db_conn:
-            self.log_message(
-                "Não está em modo de banco de dados para atualizar itens.",
-                level="ERROR",
-                source="DB",
-            )
-            return
-
-        try:
-            cursor = self.db_conn.cursor()
-            update_query = """
+        update_query = """
             UPDATE public.itemmall SET
                 item_id = %s,
                 item_group = %s,
@@ -1799,64 +1687,30 @@ class ItemMallEditor:
                 new_account_day_limit = %s,
                 note = %s
             WHERE item_id = %s AND item_group = %s AND item_index = %s AND money_unit = %s;
-            """
+        """
 
-            original_item_id = getattr(item, "_original_item_id", item.item_id)
-            original_item_group = getattr(item, "_original_item_group", item.item_group)
-            original_item_index = getattr(item, "_original_item_index", item.item_index)
-            original_money_unit = getattr(item, "_original_money_unit", item.money_unit)
+        original_item_id = getattr(item, "_original_item_id", item.item_id)
+        original_item_group = getattr(item, "_original_item_group", item.item_group)
+        original_item_index = getattr(item, "_original_item_index", item.item_index)
+        original_money_unit = getattr(item, "_original_money_unit", item.money_unit)
 
-            cursor.execute(
-                update_query,
-                (
-                    item.item_id,
-                    item.item_group,
-                    item.item_index,
-                    item.item_num,
-                    item.money_unit,
-                    item.point,
-                    item.special_price,
-                    item.sell,
-                    item.on_sell_date,
-                    item.not_sell_date,
-                    item.account_num_limit,
-                    item.recognized_percentage,
-                    item.fortune_bag,
-                    item.allow_buy_level,
-                    item.new_account_day_limit,
-                    item.note,
-                    original_item_id,
-                    original_item_group,
-                    original_item_index,
-                    original_money_unit,
-                ),
-            )
-            self.db_conn.commit()
-            self.log_message(
-                f"Item {item.item_id} (Index: {item.item_index}) atualizado no banco de dados.",
-                level="INFO",
-                source="DB",
-            )
-
-        except PgError as e:
-            self.db_conn.rollback()
-            self.log_message(
-                f"Erro ao atualizar item no DB: {e}", level="ERROR", source="DB"
-            )
-        except Exception as e:
-            self.db_conn.rollback()
-            self.log_message(
-                f"Erro inesperado ao atualizar item no DB: {str(e)}",
-                level="ERROR",
-                source="DB",
-            )
-        finally:
-            end_time = time.time()
-            self.log_message(
-                f"Tempo de atualização de item no DB: {end_time - start_time:.4f} segundos",
-                level="INFO",
-                source="DB",
-            )
+        params = (
+            item.item_id, item.item_group, item.item_index, item.item_num, item.money_unit, item.point,
+            item.special_price, item.sell, item.on_sell_date, item.not_sell_date, item.account_num_limit,
+            item.recognized_percentage, item.fortune_bag, item.allow_buy_level, item.new_account_day_limit, item.note,
+            original_item_id, original_item_group, original_item_index, original_money_unit,
+        )
+        self._execute_db_operation(
+            update_query, params,
+            msg_success=f"Item {item.item_id} (Index: {item.item_index}) atualizado no banco de dados.",
+            msg_fail="Erro ao atualizar item no DB."
+        )
+        end_time = time.time()
+        self.log_message(
+            f"Tempo de atualização de item no DB: {end_time - start_time:.4f} segundos",
+            level="INFO",
+            source="DB",
+        )
 
     def remove_item_by_unique_key(self, item_to_remove: ItemMall):
         self.delete_item_from_db(item_to_remove)
@@ -1864,55 +1718,27 @@ class ItemMallEditor:
 
     def delete_item_from_db(self, item_to_remove: ItemMall):
         start_time = time.time()
-        if not self.db_conn:
-            self.log_message(
-                "Não está em modo de banco de dados para excluir itens.",
-                level="ERROR",
-                source="DB",
-            )
-            return
-
-        try:
-            cursor = self.db_conn.cursor()
-            delete_query = """
+        delete_query = """
             DELETE FROM public.itemmall
             WHERE item_id = %s AND item_group = %s AND item_index = %s AND money_unit = %s;
-            """
-            cursor.execute(
-                delete_query,
-                (
-                    item_to_remove.item_id,
-                    item_to_remove.item_group,
-                    item_to_remove.item_index,
-                    item_to_remove.money_unit,
-                ),
-            )
-            self.db_conn.commit()
-            self.log_message(
-                f"Item {item_to_remove.item_id} (Index: {item_to_remove.item_index}) excluído do banco de dados.",
-                level="INFO",
-                source="DB",
-            )
-
-        except PgError as e:
-            self.db_conn.rollback()
-            self.log_message(
-                f"Erro ao excluir item do DB: {e}", level="ERROR", source="DB"
-            )
-        except Exception as e:
-            self.db_conn.rollback()
-            self.log_message(
-                f"Erro inesperado ao excluir item do DB: {str(e)}",
-                level="ERROR",
-                source="DB",
-            )
-        finally:
-            end_time = time.time()
-            self.log_message(
-                f"Tempo de exclusão de item do DB: {end_time - start_time:.4f} segundos",
-                level="INFO",
-                source="DB",
-            )
+        """
+        params = (
+            item_to_remove.item_id,
+            item_to_remove.item_group,
+            item_to_remove.item_index,
+            item_to_remove.money_unit,
+        )
+        self._execute_db_operation(
+            delete_query, params,
+            msg_success=f"Item {item_to_remove.item_id} (Index: {item_to_remove.item_index}) excluído do banco de dados.",
+            msg_fail="Erro ao excluir item do DB."
+        )
+        end_time = time.time()
+        self.log_message(
+            f"Tempo de exclusão de item do DB: {end_time - start_time:.4f} segundos",
+            level="INFO",
+            source="DB",
+        )
 
     def run(self):
         self.root.mainloop()
@@ -2284,6 +2110,13 @@ class ItemDialog:
     def cancel_and_save_state(self):
         ItemDialog._save_default_point = self.save_point_var.get()
         ItemDialog._save_default_special_price = self.save_special_price_var.get()
+        
+        if not self.is_edit and hasattr(self.item, '_original_item_id'):
+            delattr(self.item, '_original_item_id')
+            delattr(self.item, '_original_item_group')
+            delattr(self.item, '_original_item_index')
+            delattr(self.item, '_original_money_unit')
+
         self.dialog.destroy()
 
     def update_item_preview(self, event=None):
@@ -2391,6 +2224,10 @@ class ItemDialog:
                 or special_price < 0
                 or sell not in [0, 1]
             ):
+                messagebox.showwarning(
+                    "Entrada Inválida",
+                    "Valores numéricos não podem ser negativos. 'À Venda' deve ser 0 ou 1.",
+                )
                 self.main_app.log_message(
                     "Valores numéricos não podem ser negativos. 'À Venda' deve ser 0 ou 1.",
                     level="ERROR",
@@ -2399,29 +2236,59 @@ class ItemDialog:
                 return
 
             if item_group == 50:
-                current_popular_items = [
-                    item
-                    for item in self.main_app.items
-                    if item.item_group == 50 and item.money_unit == money_unit
-                ]
-                if self.is_edit:
-                    if (
-                        self.item.item_group == 50
-                        and self.item.money_unit == money_unit
-                    ):
-                        if len(current_popular_items) > 8:
+                current_popular_items_count = len(
+                    [
+                        item
+                        for item in self.main_app.items
+                        if item.item_group == 50
+                        and item.money_unit == money_unit
+                    ]
+                )
+                if current_popular_items_count >= 8:
+                    if self.is_edit:
+                        is_current_item_in_popular = (self.item.item_group == 50 and self.item.money_unit == money_unit)
+                        if item_group == 50 and not is_current_item_in_popular and current_popular_items_count >=8:
+                            messagebox.showwarning(
+                                "Limite de Itens",
+                                "A aba POPULAR permite um máximo de 8 itens. Não é possível adicionar mais.",
+                            )
                             self.main_app.log_message(
-                                "Só é permitido até 8 itens na aba POPULAR.",
+                                "Tentativa de adicionar mais de 8 itens na aba POPULAR.",
                                 level="WARNING",
                                 source="UI",
                             )
                             return
+                        elif item_group == 50 and is_current_item_in_popular and current_popular_items_count > 8:
+                             messagebox.showwarning(
+                                "Limite de Itens",
+                                "A aba POPULAR permite um máximo de 8 itens. Não é possível ter mais do que isso.",
+                            )
+                             self.main_app.log_message(
+                                "Tentativa de alterar um item na aba POPULAR, resultando em mais de 8 itens.",
+                                level="WARNING",
+                                source="UI",
+                            )
+                             return
+                    else:
+                        messagebox.showwarning(
+                            "Limite de Itens",
+                            "A aba POPULAR permite um máximo de 8 itens. Não é possível adicionar mais.",
+                        )
+                        self.main_app.log_message(
+                            "Tentativa de adicionar mais de 8 itens na aba POPULAR.",
+                            level="WARNING",
+                            source="UI",
+                        )
+                        return
 
             if self.is_edit:
                 self.item._original_item_id = self.item.item_id
                 self.item._original_item_group = self.item.item_group
                 self.item._original_item_index = self.item.item_index
                 self.item._original_money_unit = self.item.money_unit
+            else:
+                 pass
+
 
             self.item.item_id = item_id
             self.item.item_group = item_group
@@ -2457,12 +2324,19 @@ class ItemDialog:
             )
             self.dialog.destroy()
         except ValueError as e:
+            messagebox.showwarning(
+                "Entrada Inválida",
+                f"Erro de tipo: Verifique se todos os campos numéricos estão corretos. Detalhe: {e}",
+            )
             self.main_app.log_message(
                 f"Entrada inválida. Verifique os campos numéricos. {e}",
                 level="ERROR",
                 source="UI",
             )
         except Exception as e:
+            messagebox.showerror(
+                "Erro Inesperado", f"Ocorreu um erro ao salvar o item: {e}"
+            )
             self.main_app.log_message(
                 f"Ocorreu um erro ao salvar o item: {e}", level="ERROR", source="UI"
             )
@@ -2476,13 +2350,20 @@ class ItemDialog:
 
     def delete_item(self):
         start_time = time.time()
-        self.main_app.remove_item_by_unique_key(self.item)
-        self.main_app.log_message(
-            f"Item {self.item.display_name} (ID: {self.item.item_id}) excluído.",
-            level="INFO",
-            source="UI",
-        )
-        self.dialog.destroy()
+        if messagebox.askyesno("Confirmar Exclusão", f"Tem certeza que deseja excluir o item '{self.item.display_name}' (ID: {self.item.item_id})?"):
+            self.main_app.remove_item_by_unique_key(self.item)
+            self.main_app.log_message(
+                f"Item {self.item.display_name} (ID: {self.item.item_id}) excluído.",
+                level="INFO",
+                source="UI",
+            )
+            self.dialog.destroy()
+        else:
+            self.main_app.log_message(
+                "Exclusão de item cancelada pelo usuário.",
+                level="INFO",
+                source="UI",
+            )
         end_time = time.time()
         self.main_app.log_message(
             f"Tempo de exclusão de item: {end_time - start_time:.4f} segundos",
