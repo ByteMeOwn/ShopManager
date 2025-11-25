@@ -1,0 +1,8 @@
+build/
+share/
+lib/
+setup.py
+*.dll
+*.exe
+.env
+.vs/
